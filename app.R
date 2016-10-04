@@ -1,6 +1,19 @@
 
 library(shiny)
 
+reactiveTrigger <- function() {
+  rv <- reactiveValues(a = 0)
+  list(
+    depend = function() {
+      rv$a
+      invisible()
+    },
+    trigger = function() {
+      rv$a <- isolate(rv$a + 1)
+    }
+  )
+}
+
 ## Buttons are dynamically generated, because the Cancel and the
 ## Save button are only shown if something has changed.
 
@@ -36,12 +49,30 @@ server <- function(input, output, session) {
   ##
   ## `dataSame` declares whether `data` and `dbdata` are the same.
 
+  # jcheng: Used to force a redraw of the UI
+  uiTrigger <- reactiveTrigger()
+  # jcheng: Used to force invalidation of the file data
+  fileTrigger <- reactiveTrigger()
+
   rvs <- reactiveValues(
-    data = list(),
-    dbdata = list(),
-    recordState = 1,
-    dataSame = TRUE
+    data = list()
   )
+
+  dbdata <- reactive({
+    fileTrigger$depend()
+    req(input$file)
+    cat("i Reading input file", input$file, "\n")
+    read.csv(input$file, stringsAsFactors = FALSE)
+  })
+
+  observeEvent(dbdata(), {
+    rvs$data <- dbdata()
+    uiTrigger$trigger()
+  })
+
+  dataSame <- reactive({
+    identical(rvs$data, dbdata())
+  })
 
   ## The dynamic buttons, 'Cancel' and 'Save' are only shown if sg has
   ## changed.
@@ -49,7 +80,7 @@ server <- function(input, output, session) {
   output$buttons <- renderUI({
     div(
       actionButton(inputId = "add", label = "Add"),
-      if (! rvs$dataSame) {
+      if (! dataSame()) {
         span(
           actionButton(inputId = "cancel", label = "Cancel"),
           actionButton(inputId = "save", label = "Save",
@@ -81,14 +112,6 @@ server <- function(input, output, session) {
   ## (1) set data and dbdata to the contents of the file, and
   ## (2) trigger a UI rebuild
 
-  observeEvent(input$file, {
-    cat("i Reading input file", input$file, "\n")
-    d <- read.csv(input$file, stringsAsFactors = FALSE)
-    rvs$data <- rvs$dbdata <- d
-    rvs$recordState <- rvs$recordState + 1
-    rvs$dataSame <- TRUE
-  })
-
   ## Adding a new record. We create a new id for it first, then
   ## just add it to the bottom of the data frame that holds the data.
   ## Then we trigger a UI rebuild.
@@ -104,8 +127,7 @@ server <- function(input, output, session) {
       max(as.numeric(rvs$data$id)) + 1
     }
     rvs$data <- rbind(rvs$data, list(id = newid, description = ""))
-    rvs$recordState <- rvs$recordState + 1
-    rvs$dataSame <- identical(rvs$data, rvs$dbdata)
+    uiTrigger$trigger()
   })
 
   ## Cancel button is pressed. We need to restore the data from the
@@ -114,9 +136,8 @@ server <- function(input, output, session) {
 
   observeEvent(input$cancel, {
     cat("i Cancelling all modifications\n")
-    rvs$data <- rvs$dbdata
-    rvs$recordState <- rvs$recordState + 1
-    rvs$dataSame <- TRUE
+    rvs$data <- dbdata()
+    uiTrigger$trigger()
   })
 
   ## Save button was pressed. Save the file and set dbdata to data.
@@ -124,8 +145,7 @@ server <- function(input, output, session) {
   observeEvent(input$save, {
     cat("i Saving", input$file)
     write.csv(rvs$data, input$file, quote = FALSE, row.names = FALSE)
-    rvs$dbdata <- rvs$data
-    rvs$dataSame <- TRUE
+    fileTrigger$trigger()
   })
 
   ## Recipe to build the UI. The dummy `rvs$recordState` expression
@@ -142,7 +162,7 @@ server <- function(input, output, session) {
 
   output$records <- renderUI({
     cat("i Updating record display\n")
-    rvs$recordState
+    uiTrigger$depend()
     mydata <- isolate(rvs$data)
     w <- lapply(seq_len(nrow(mydata)), function(i) {
       create_record(i, mydata[i,])
@@ -191,15 +211,13 @@ server <- function(input, output, session) {
 
         observeEvent(input[[paste0("inp-", wid)]], {
           rvs$data[wid, "description"] <- input[[paste0("inp-", wid)]]
-          rvs$dataSame <- identical(rvs$data, rvs$dbdata)
         })
 
         ## Deleting a record. Quite simple.
 
         observeEvent(input[[paste0("del-", wid)]], {
           rvs$data <- rvs$data[-wid, , drop = FALSE]
-          rvs$recordState <- rvs$recordState + 1
-          rvs$dataSame <- identical(rvs$data, rvs$dbdata)
+          uiTrigger$trigger()
         })
 
         ## We need to update the number of wired widgets in the closure
